@@ -17,13 +17,13 @@
 //! ```
 //!
 //! [International Standard Book Number]: https://www.isbn-international.org/
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(feature = "runtime-ranges"), no_std)]
 #![deny(clippy::missing_errors_doc)]
 #![deny(clippy::if_not_else)]
 
-#[cfg(feature = "std")]
+#[cfg(feature = "runtime-ranges")]
 pub mod range;
-#[cfg(feature = "std")]
+#[cfg(feature = "runtime-ranges")]
 pub use range::IsbnRange;
 
 use core::char;
@@ -198,7 +198,8 @@ fn convert_isbn10_check(d: u8) -> char {
 /// 10-digit ISBN format.
 #[derive(Debug, PartialEq, Copy, Clone, Hash)]
 pub struct Isbn10 {
-    digits: [u8; 10],
+    digits: [u8; 9],
+    check_digit: u8,
 }
 
 impl IsbnObject for Isbn10 {
@@ -206,7 +207,7 @@ impl IsbnObject for Isbn10 {
     fn hyphenate_with(&self, hyphen_at: [usize; 2]) -> ArrayString<[u8; 17]> {
         let mut hyphenated = ArrayString::new();
 
-        for (i, &digit) in self.digits[0..9].iter().enumerate() {
+        for (i, &digit) in self.digits.iter().enumerate() {
             if hyphen_at.contains(&i) {
                 hyphenated.push('-')
             }
@@ -214,7 +215,7 @@ impl IsbnObject for Isbn10 {
         }
 
         hyphenated.push('-');
-        hyphenated.push(convert_isbn10_check(self.digits[9]));
+        hyphenated.push(convert_isbn10_check(self.check_digit));
 
         hyphenated
     }
@@ -254,10 +255,16 @@ impl Isbn10 {
     /// will be returned. If the check digit is not correct for the ISBN, an error will also
     /// be returned.
     pub fn new(digits: [u8; 10]) -> IsbnResult<Isbn10> {
-        if digits[..9].iter().any(|&digit| digit > 9) || digits[9] > 10 {
+        let check_digit = digits[9];
+        let digits = {
+            let mut xdigits = [0; 9];
+            xdigits.clone_from_slice(&digits[0..9]);
+            xdigits
+        };
+        if digits.iter().any(|&digit| digit > 9) || check_digit > 10 {
             Err(IsbnError::DigitTooLarge)
-        } else if Isbn10::calculate_check_digit(&digits) == digits[9] {
-            Ok(Isbn10 { digits })
+        } else if Isbn10::calculate_check_digit(&digits) == check_digit {
+            Ok(Isbn10 { digits, check_digit })
         } else {
             Err(IsbnError::InvalidChecksum)
         }
@@ -275,18 +282,15 @@ impl Isbn10 {
     /// If the ISBN13 does not have a 978 prefix, it can not be downcast to an ISBN10, and an
     /// error will be returned.
     pub fn try_from(isbn13: Isbn13) -> IsbnResult<Self> {
-        if isbn13.digits[..3] == [9, 7, 8] {
-            let mut a = [0; 10];
-            a[..9].clone_from_slice(&isbn13.digits[3..12]);
-            a[9] = Isbn10::calculate_check_digit(&a);
-            Ok(Isbn10 { digits: a })
+        if isbn13.prefix == [9, 7, 8] {
+            Ok(Isbn10 { check_digit: Isbn10::calculate_check_digit(&isbn13.digits), digits: isbn13.digits.clone() })
         } else {
             Err(IsbnError::InvalidConversion)
         }
     }
 
-    fn calculate_check_digit(digits: &[u8; 10]) -> u8 {
-        let sum: usize = digits[..9]
+    fn calculate_check_digit(digits: &[u8; 9]) -> u8 {
+        let sum: usize = digits
             .iter()
             .enumerate()
             .map(|(i, &d)| d as usize * (10 - i))
@@ -338,10 +342,10 @@ impl Isbn10 {
 impl fmt::Display for Isbn10 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut s = ArrayString::<[u8; 10]>::new();
-        self.digits[0..9]
+        self.digits
             .iter()
             .for_each(|&digit| s.push(convert_isbn_body(digit)));
-        s.push(convert_isbn10_check(self.digits[9]));
+        s.push(convert_isbn10_check(self.check_digit));
         write!(f, "{}", s)
     }
 }
@@ -361,19 +365,21 @@ impl FromStr for Isbn10 {
 /// 13-digit ISBN format.
 #[derive(Debug, PartialEq, Copy, Clone, Hash)]
 pub struct Isbn13 {
-    digits: [u8; 13],
+    prefix: [u8; 3],
+    digits: [u8; 9],
+    check_digit: u8,
 }
 
 impl IsbnObject for Isbn13 {
     fn hyphenate_with(&self, hyphen_at: [usize; 2]) -> ArrayString<[u8; 17]> {
         let mut hyphenated = ArrayString::new();
 
-        for &digit in &self.digits[0..3] {
+        for &digit in &self.prefix {
             hyphenated.push(convert_isbn_body(digit))
         }
         hyphenated.push('-');
 
-        for (i, &digit) in self.digits[3..12].iter().enumerate() {
+        for (i, &digit) in self.digits.iter().enumerate() {
             if hyphen_at.contains(&i) {
                 hyphenated.push('-')
             }
@@ -381,24 +387,24 @@ impl IsbnObject for Isbn13 {
         }
 
         hyphenated.push('-');
-        hyphenated.push(convert_isbn_body(self.digits[12]));
+        hyphenated.push(convert_isbn_body(self.check_digit));
 
         hyphenated
     }
 
     fn prefix_element(&self) -> u16 {
-        ((self.digits[0] as u16) << 8) | ((self.digits[1] as u16) << 4) | (self.digits[2] as u16)
+        ((self.prefix[0] as u16) << 8) | ((self.prefix[1] as u16) << 4) | (self.prefix[2] as u16)
     }
 
     fn segment(&self, base: usize) -> u32 {
-        (3..9).fold(0, |s, i| {
-            s + u32::from(*self.digits.get(base + i).unwrap_or(&0)) * 10_u32.pow(9 - i as u32)
+        (0..6).fold(0, |s, i| {
+            s + u32::from(*self.digits.get(base + i).unwrap_or(&0)) * 10_u32.pow(6 - i as u32)
         })
     }
 
     fn group_prefix(&self, length: usize) -> u32 {
         let mut digits = 0;
-        for &digit in &self.digits[3..length + 3] {
+        for &digit in &self.digits[..length] {
             digits = (digits << 4) | digit as u32;
         }
         digits
@@ -421,18 +427,43 @@ impl Isbn13 {
     /// correct for the ISBN, an error will also be returned.
     pub fn new(digits: [u8; 13]) -> IsbnResult<Isbn13> {
         if digits.iter().any(|&digit| digit > 9) {
-            Err(IsbnError::DigitTooLarge)
-        } else if Isbn13::calculate_check_digit(&digits) == digits[12] {
-            Ok(Isbn13 { digits })
+            return Err(IsbnError::DigitTooLarge);
+        }
+
+        let (prefix, digits, check_digit) = {
+            let mut prefix = [0; 3];
+            let mut xdigits = [0; 9];
+            let (a, b) = digits.split_at(3);
+            let (b, c) = b.split_at(9);
+            prefix.clone_from_slice(a);
+            xdigits.clone_from_slice(b);
+            (prefix, xdigits, c[0])
+        };
+
+        if Isbn13::calculate_check_digit(&prefix, &digits) != check_digit {
+            return Err(IsbnError::InvalidChecksum);
+        }
+
+         Ok(Isbn13 { prefix, digits, check_digit })
+    }
+
+    fn calculate_check_digit_combined(digits: &[u8; 13]) -> u8 {
+        let mut sum = 0u16;
+        for i in 0..6 {
+            sum += u16::from(digits[i * 2] + 3 * digits[i * 2 + 1]);
+        }
+        let sum_m = (sum % 10) as u8;
+        if sum_m == 0 {
+            0
         } else {
-            Err(IsbnError::InvalidChecksum)
+            10 - sum_m
         }
     }
 
-    fn calculate_check_digit(digits: &[u8; 13]) -> u8 {
-        let mut sum = 0;
-        for i in 0..6 {
-            sum += u16::from(digits[i * 2] + 3 * digits[i * 2 + 1]);
+    fn calculate_check_digit(prefix: &[u8; 3], digits: &[u8; 9]) -> u8 {
+        let mut sum = (prefix[0] + prefix[1] * 3 + prefix[2] + digits[0] * 3) as u16;
+        for i in 1..5 {
+            sum += u16::from(digits[i * 2 - 1] + 3 * digits[i * 2]);
         }
         let sum_m = (sum % 10) as u8;
         if sum_m == 0 {
@@ -482,8 +513,7 @@ impl Isbn13 {
 impl fmt::Display for Isbn13 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut s = ArrayString::<[u8; 13]>::new();
-        self.digits
-            .iter()
+        self.prefix.iter().chain(self.digits.iter()).chain([self.check_digit].iter())
             .for_each(|&digit| s.push(convert_isbn_body(digit)));
         write!(f, "{}", s)
     }
@@ -491,11 +521,11 @@ impl fmt::Display for Isbn13 {
 
 impl From<Isbn10> for Isbn13 {
     fn from(isbn10: Isbn10) -> Isbn13 {
-        let mut digits = [0; 13];
-        digits[..3].clone_from_slice(&[9, 7, 8]);
-        digits[3..12].clone_from_slice(&isbn10.digits[0..9]);
-        digits[12] = Isbn13::calculate_check_digit(&digits);
-        Isbn13 { digits }
+        Isbn13 {
+            prefix: [9, 7, 8],
+            check_digit: Isbn13::calculate_check_digit(&[9, 7, 8], &isbn10.digits),
+            digits: isbn10.digits
+        }
     }
 }
 
@@ -608,11 +638,13 @@ impl Parser {
 
     /// Reads an ISBN13 from self. Requires that length is checked beforehand.
     fn read_isbn13(&mut self) -> Result<Isbn13, IsbnError> {
-        let mut digits = [0; 13];
-        digits.clone_from_slice(&self.digits);
-        let check_digit = Isbn13::calculate_check_digit(&digits);
-        if check_digit == digits[12] {
-            Ok(Isbn13 { digits })
+        let mut prefix = [0; 3];
+        let mut digits = [0; 9];
+        prefix.clone_from_slice(&self.digits[0..3]);
+        digits.clone_from_slice(&self.digits[3..12]);
+        let check_digit = Isbn13::calculate_check_digit(&prefix, &digits);
+        if check_digit == self.digits[12] {
+            Ok(Isbn13 { prefix, digits, check_digit })
         } else {
             Err(IsbnError::InvalidDigit)
         }
@@ -620,11 +652,11 @@ impl Parser {
 
     /// Reads an ISBN10 from self. Requires that length is checked beforehand.
     fn read_isbn10(&mut self) -> Result<Isbn10, IsbnError> {
-        let mut digits = [0; 10];
-        digits.clone_from_slice(&self.digits);
+        let mut digits = [0; 9];
+        digits.clone_from_slice(&self.digits[..9]);
         let check_digit = Isbn10::calculate_check_digit(&digits);
-        if check_digit == digits[9] {
-            Ok(Isbn10 { digits })
+        if check_digit == self.digits[9] {
+            Ok(Isbn10 { digits, check_digit })
         } else {
             Err(IsbnError::InvalidDigit)
         }
@@ -697,16 +729,17 @@ mod tests {
 
     #[test]
     fn test_isbns_do_not_accept_larger_digits() {
-        let mut a = [10; 10];
+        let a = [10; 9];
+        let mut b = [10; 10];
         // Everything except check digit must be <= 9.
-        a[9] = Isbn10::calculate_check_digit(&a);
-        assert!(Isbn10::new(a).is_err());
+        b[9] = Isbn10::calculate_check_digit(&a);
+        assert!(Isbn10::new(b).is_err());
         // Check digit can be 10.
         assert!(Isbn10::new([0, 9, 7, 5, 2, 2, 9, 8, 0, 10]).is_ok());
         // Check digits which are larger than 10 are implicitly handled by
         // the fact that calculate_check_digit returns a number from 0 to 10.
         let mut a = [10; 13];
-        a[12] = Isbn13::calculate_check_digit(&a);
+        a[12] = Isbn13::calculate_check_digit(&[10; 3], &[10; 9]);
         assert!(Isbn13::new(a).is_err());
     }
 }
